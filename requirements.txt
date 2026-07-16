@@ -1,0 +1,7 @@
+menlo-robot-sdk[livekit]==0.3.0
+pydantic==2.13.4
+pydantic-core==2.46.4
+python-dotenv==1.2.2
+pillow==12.3.0
+jupyterlab==4.6.1
+ipykernel==7.3.0
