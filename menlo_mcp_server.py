@@ -69,11 +69,27 @@ def _action_status(response: dict[str, Any]) -> str | None:
 def _action_error(response: dict[str, Any]) -> Any:
     result = response.get("result", {})
     if not isinstance(result, dict):
-        return None
+        return response.get("error")
     nested = result.get("result", {})
     if isinstance(nested, dict) and nested.get("error") is not None:
         return nested["error"]
-    return result.get("error")
+    return result.get("error", response.get("error"))
+
+
+def _action_error_message(response: dict[str, Any]) -> str | None:
+    error = _action_error(response)
+    if isinstance(error, dict):
+        code = error.get("code")
+        message = error.get("message")
+        if code and message:
+            return f"{code}: {message}"
+        if message:
+            return str(message)
+        if code:
+            return str(code)
+    if error is not None:
+        return str(error)
+    return None
 
 
 def _contains_error_code(value: Any, code: str) -> bool:
@@ -765,28 +781,37 @@ class MenloRobotController:
         if method == "go_to":
             navigation = result.get("navigation", {})
             if navigation.get("status") != "done":
-                failure = f"navigation status is {navigation.get('status')!r}"
+                failure = _action_error_message(result) or (
+                    f"navigation status is {navigation.get('status')!r}"
+                )
         elif method == "pick":
             if result.get("status") == "unexpected_pick":
                 failure = result.get("message", "picked an unexpected entity")
             elif _action_status(result) != "done":
-                failure = f"pick status is {_action_status(result)!r}"
+                failure = _action_error_message(result) or (
+                    f"pick status is {_action_status(result)!r}"
+                )
         elif method == "place":
             placement = result.get("placement", {})
             if placement.get("status") not in {"verified", "recycled"}:
-                failure = result.get(
-                    "message",
-                    f"placement status is {placement.get('status')!r}",
+                failure = (
+                    result.get("message")
+                    or _action_error_message(result)
+                    or f"placement status is {placement.get('status')!r}"
                 )
         elif method in {"walk", "turn"}:
             status = result.get("status")
             if isinstance(status, str) and status.startswith("timed_out_"):
                 failure = f"motion status is {status!r}"
             elif _action_status(result) != "done":
-                failure = f"motion status is {_action_status(result)!r}"
+                failure = _action_error_message(result) or (
+                    f"motion status is {_action_status(result)!r}"
+                )
         elif method == "stop":
             if _action_status(result) != "done":
-                failure = f"stop status is {_action_status(result)!r}"
+                failure = _action_error_message(result) or (
+                    f"stop status is {_action_status(result)!r}"
+                )
             else:
                 final_state, state_error = await self._wait_for_motion_stop(
                     require_navigation_inactive=True

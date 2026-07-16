@@ -518,6 +518,40 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["failed_method"], "pick")
         self.assertEqual([call[0] for call in self.session.calls], ["pick_entity"])
 
+    async def test_execute_code_surfaces_native_placement_error(self):
+        self.session.state.robot_status = {
+            "robot": {"status": "holding", "held_entity_ids": ["cube_4"]}
+        }
+        self.session.invoke_result = {
+            "status": "failed",
+            "error": {
+                "code": "EXECUTION_FAILED",
+                "message": "wrong_color_destination",
+            },
+        }
+
+        response = await self.controller.execute_code('menlo.place("pad_B")')
+
+        self.assertEqual(response["status"], "action_failed")
+        self.assertEqual(response["failed_method"], "place")
+        self.assertEqual(response["error"], "EXECUTION_FAILED: wrong_color_destination")
+        self.assertEqual(response["trace"][0]["error"], response["error"])
+
+    async def test_execute_code_surfaces_native_pick_error(self):
+        self.session.invoke_result = {
+            "status": "failed",
+            "error": {
+                "code": "EXECUTION_FAILED",
+                "message": "out_of_reach",
+            },
+        }
+
+        response = await self.controller.execute_code('menlo.pick("cube_4")')
+
+        self.assertEqual(response["status"], "action_failed")
+        self.assertEqual(response["failed_method"], "pick")
+        self.assertEqual(response["error"], "EXECUTION_FAILED: out_of_reach")
+
     async def test_execute_code_stop_confirms_motion_stopped(self):
         self.session.state.robot_status = _motion_state(0.0)
 
