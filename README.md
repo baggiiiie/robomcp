@@ -63,6 +63,9 @@ The project-local operating guidance is in
 `.agents/skills/menlo-robot-operator/SKILL.md`. It is scoped to this repository and
 is discovered only when Codex is working in this project.
 
+Known tool and runtime shortcomings, their ownership, and recommended fixes are
+documented in [`ROBOT_TOOL_LIMITATIONS.md`](ROBOT_TOOL_LIMITATIONS.md).
+
 ## Reproduce an upstream exact-pick mismatch
 
 Run the direct-SDK reproduction without the MCP server:
