@@ -45,7 +45,7 @@ Use this sequence for color or visual requests:
 
 1. Reach the requested area with `go_to`.
 2. Call `look` before using scene color metadata to select an object.
-3. If the target is absent, scan with `look` using a small set of deliberate yaw positions. In SimpleSim, positive pitch looks down and negative pitch looks up; use a modest positive pitch (for example, 15–18 degrees) for the conveyor or pad. The MCP rejects downward pitch above +20 degrees because the current model saturates near +19.3 degrees despite advertising a larger range. Within the same tool call, `look` estimates a convergence window from the requested angular travel, polls measured head state, fails early if progress stalls, and captures only after convergence.
+3. If the target is absent, scan with `look` using a small set of deliberate yaw positions. In SimpleSim, positive pitch looks down and negative pitch looks up; use a modest positive pitch (for example, 15–18 degrees) for the conveyor or pad. The MCP rejects downward pitch above +20 degrees. Within the same tool call, `look` waits five seconds after a successful head aim, then captures the camera image.
 4. If head scanning is insufficient, reposition to a midpoint entity or another safe viewpoint, then capture again.
 5. Once the target is visibly identified, refresh `get_scene` and map the observed object to an exact entity ID.
 6. Approach that exact entity with `go_to` before `pick`; otherwise the runtime may choose a nearer reachable object.

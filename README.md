@@ -1,39 +1,49 @@
-# Menlo Robot SDK learning project
+# Menlo Robot MCP
 
-This project contains two small ways to learn the Menlo SDK:
+`robomcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that
+exposes safe, intuitive robot controls for the Menlo SDK to any MCP-compatible coding
+agent. It wraps the Menlo SimpleSim runtime with guarded tools that verify their
+postconditions, so an agent can navigate, look, pick, place, and run bounded multi-step
+plans without touching the low-level SDK.
 
-- `menlo_sdk_simple_learning.ipynb` walks through the SDK directly.
-- `menlo_mcp_server.py` exposes intuitive robot controls to any MCP-compatible coding agent.
+See [`PROJECT_PROGRESS.md`](PROJECT_PROGRESS.md) for a fuller overview.
+
+## Tools
+
+| Tool | Description |
+| --- | --- |
+| `start_robot` / `stop_robot` | Create/delete a temporary robot session; `start_robot` returns a `viewer_url`. |
+| `get_scene` / `get_robot_state` | Inspect scene entities and the robot's pose, velocity, and held entity. |
+| `look` | Capture the camera view, optionally aiming with `yaw_degrees`/`pitch_degrees`. |
+| `walk` / `turn` / `stop` | Bounded motion commands with verified stop reporting. |
+| `go_to` | Navigate to a scene `entity_id` via Menlo's native A* planner. |
+| `pick` / `place` | Grab and place entities, verified against a refreshed scene. |
+| `menlo_execute` | Run a bounded, validated multi-step plan over the guarded methods. |
+
+Every motion, pick, and place verifies its postcondition. `go_to` retries at most twice
+on `NAVIGATION_STUCK`, only after measured progress. Timed motions report
+`timed_out_stopped` only once the robot is confirmed stopped, else
+`timed_out_motion_unconfirmed`.
 
 ## Set up
 
-Use Python 3.12 so the SDK's `pydantic` dependencies do not conflict with system Python:
+Use Python 3.12 so the SDK's `pydantic` deps don't conflict with system Python:
 
 ```bash
 uv venv --python 3.12 --seed .venv
 source .venv/bin/activate
 uv pip install -r requirements.txt
-cp .env.example .env
-```
-
-Put your Menlo API key in `.env`:
-
-```text
-MENLO_API_KEY=your_key_here
+cp .env.example .env   # then set MENLO_API_KEY
 ```
 
 ## Run the MCP server
-
-To confirm that the server launches, run:
 
 ```bash
 .venv/bin/python menlo_mcp_server.py
 ```
 
-The server uses MCP's stdio transport, so it waits silently for an MCP client. It is
-normally launched by your coding agent, not used directly from the terminal.
-
-Configure an MCP client with an entry like this (replace the paths if you move the project):
+It uses MCP's stdio transport and is normally launched by your coding agent. Configure
+an MCP client like:
 
 ```json
 {
@@ -46,41 +56,14 @@ Configure an MCP client with an entry like this (replace the paths if you move t
 }
 ```
 
-Then ask the agent to call `start_robot`. Open the returned `viewer_url` in Chrome
-and keep that tab visible: the SimpleSim runtime runs in the browser. Once the scene
-has loaded, the agent can use:
-
-- `get_scene`, `get_robot_state`, and `look`
-- `walk`, `turn`, `go_to`, and `stop`
-- `pick` and verified `place`
-- `menlo_execute` for bounded, high-confidence multi-step plans
-- `stop_robot` to delete the temporary robot and release the session
-
-`look(yaw_degrees?, pitch_degrees?)` replaces the separate camera and head tools.
-When angles are supplied it waits for measured head convergence before capturing;
-positive pitch looks down and negative pitch looks up. For the current SimpleSim
-model, pitch is limited to -40 degrees up through +20 degrees down because larger
-positive targets saturate near +19.3 degrees even though runtime state advertises a
-larger range. With no angles it captures the current view. `place` rejects
-source-table recycling unless `allow_recycle=true` is explicit, then refreshes the
-scene to verify the postcondition.
-
-`go_to(entity_id)` passes an exact scene entity ID to Menlo's native `go_to` skill.
-Menlo performs the A* route planning and obstacle avoidance. If navigation reports
-`NAVIGATION_STUCK`, the MCP retries at most twice and only after at least 10 cm of
-measured progress toward the target, runtime readiness, zero commanded velocity,
-and confirmation that navigation is inactive. A navigation timeout is cancelled
-and verified with the same stop checks used for velocity commands.
-
-Timed `walk` and `turn` failures trigger an immediate `cancel` followed by state
-polling. Their result reports `timed_out_stopped` only after the runtime is ready and
-all commanded velocities are zero; otherwise it reports
-`timed_out_motion_unconfirmed`.
+Ask the agent to call `start_robot`, open the returned `viewer_url` in Chrome, and keep
+that tab visible—the SimpleSim runtime runs in the browser.
 
 ## Executable plans
 
-`menlo_execute(code)` runs a deliberately small Python-like language over the same
-guarded controller methods. Calls look synchronous—do not write `await`:
+`menlo_execute(code)` runs a small Python-like language over the guarded methods
+(`get_robot_state`, `get_scene`, `go_to`, `pick`, `place`, `stop`, `turn`, `walk`).
+Calls are synchronous—no `await`:
 
 ```python
 for target in ["pad_B", "pad_E", "pad_A"]:
@@ -88,54 +71,15 @@ for target in ["pad_B", "pad_E", "pad_A"]:
 return menlo.get_robot_state()
 ```
 
-The allowed methods are `get_robot_state`, `get_scene`, `go_to`, `pick`, `place`,
-`stop`, `turn`, and `walk`. Plans may assign variables, branch, loop over bounded
-collections, assert conditions, and return JSON data. The entire plan is validated
-before its first robot call, and it stops immediately when an action fails its MCP
-postcondition. Results include an ordered call trace.
+It is a restricted interpreter (no imports, function defs, filesystem/network, or
+lifecycle calls). Plans are validated before the first robot call and stop on the first
+failed postcondition. Default budgets: 20 robot calls, 20 items/loop, 120 statements, 15
+minutes.
 
-This is a restricted interpreter, not Python `exec`: imports, function definitions,
-arbitrary object access, filesystem/network access, camera capture, and robot
-lifecycle calls are unavailable. Use direct `look` calls whenever the model must
-interpret an image, then submit another executable segment after the uncertainty is
-resolved. Default budgets cap a plan at 20 robot calls, 20 items per loop, 120
-executed statements, and 15 minutes.
+## More
 
-The project-local operating guidance is in
-`.agents/skills/menlo-robot-operator/SKILL.md`. It is scoped to this repository and
-is discovered only when Codex is working in this project.
-
-Known tool and runtime shortcomings, their ownership, and recommended fixes are
-documented in [`ROBOT_TOOL_LIMITATIONS.md`](ROBOT_TOOL_LIMITATIONS.md).
-
-## Reproduce an upstream exact-pick mismatch
-
-Run the direct-SDK reproduction without the MCP server:
-
-```bash
-.venv/bin/python scripts/reproduce_upstream_pick_mismatch.py
-```
-
-Open the printed viewer URL and keep it visible. The script prints the live runtime
-schemas, navigates to pad A, and calls `MenloSession.invoke("pick_entity", ...)`
-directly. It exits successfully only when the runtime holds an entity other than the
-exact requested ID, demonstrating that the mismatch occurred below the MCP boundary.
-The temporary robot is deleted during cleanup.
-
-## Run the notebook
-
-```bash
-source .venv/bin/activate
-jupyter lab menlo_sdk_simple_learning.ipynb
-```
-
-Select **Python 3.12 (Menlo SDK)** if prompted, then run the cells from top to bottom.
-Always run the cleanup cell when finished.
-
-## Run the checks
-
-```bash
-.venv/bin/python -m unittest discover -s tests -v
-```
-
-The `.env`, `.venv`, Python caches, and notebook checkpoints are ignored by Git.
+- Operating guidance: `.agents/skills/menlo-robot-operator/SKILL.md`
+- Known limitations: [`ROBOT_TOOL_LIMITATIONS.md`](ROBOT_TOOL_LIMITATIONS.md)
+- Color-sorting benchmark: [`SORTING_BENCHMARK.md`](SORTING_BENCHMARK.md)
+- Direct SDK walkthrough: `menlo_sdk_simple_learning.ipynb`
+- Run checks: `.venv/bin/python -m unittest discover -s tests -v`

@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 from menlo_mcp_server import (
     MenloRobotController,
-    _head_convergence_timeout_s,
     _number,
 )
 
@@ -292,7 +291,7 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
             ["go_to", "cancel"],
         )
 
-    async def test_look_aims_waits_for_convergence_and_captures(self):
+    async def test_look_aims_waits_five_seconds_and_captures(self):
         self.session.state.robot_status = {
             "robot": {
                 "status": "ready",
@@ -307,77 +306,15 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
             }
         }
 
-        image = await self.controller.look(45, -20)
+        with patch("menlo_mcp.vision.asyncio.sleep") as sleep:
+            image = await self.controller.look(45, -20)
 
+        sleep.assert_awaited_once_with(5.0)
         _, parameters, _ = self.session.calls[-2]
         self.assertAlmostEqual(parameters["yaw"], math.pi / 4)
         self.assertAlmostEqual(parameters["pitch"], math.radians(-20))
         self.assertEqual(self.session.calls[-1][0], "get_vision")
         self.assertEqual(image, b"jpeg")
-
-    def test_head_convergence_timeout_scales_with_angular_distance(self):
-        timeout_s = _head_convergence_timeout_s(
-            {"pitch": math.radians(18)}, {"pitch": 0.0}
-        )
-
-        self.assertAlmostEqual(timeout_s, 7.5)
-        self.assertGreater(timeout_s, 3.0)
-
-        full_pitch_travel_s = _head_convergence_timeout_s(
-            {"pitch": math.radians(20)}, {"pitch": math.radians(-40)}
-        )
-        self.assertAlmostEqual(full_pitch_travel_s, 21.5)
-
-    async def test_look_tracks_measured_progress_before_capture(self):
-        def head_state(pitch_degrees: float) -> dict:
-            return {
-                "robot": {
-                    "status": "ready",
-                    "extra": {
-                        "head": {
-                            "measured": {
-                                "yaw": 0.0,
-                                "pitch": math.radians(pitch_degrees),
-                            }
-                        }
-                    },
-                }
-            }
-
-        states = iter([head_state(0), head_state(5), head_state(13), head_state(17)])
-
-        async def progressing_robot_state():
-            return next(states)
-
-        self.controller.robot_state = progressing_robot_state  # type: ignore[method-assign]
-
-        image = await self.controller.look(0, 18)
-
-        self.assertEqual(
-            [call[0] for call in self.session.calls], ["set_head", "get_vision"]
-        )
-        self.assertEqual(image, b"jpeg")
-
-    async def test_look_fails_without_capturing_when_head_stalls(self):
-        stationary_state = {
-            "robot": {
-                "status": "ready",
-                "extra": {"head": {"measured": {"yaw": 0.0, "pitch": 0.0}}},
-            }
-        }
-
-        async def stationary_robot_state():
-            return stationary_state
-
-        self.controller.robot_state = stationary_robot_state  # type: ignore[method-assign]
-
-        with (
-            patch("menlo_mcp_server.time.monotonic", side_effect=[0.0, 0.0, 3.0]),
-            self.assertRaisesRegex(TimeoutError, "convergence stalled"),
-        ):
-            await self.controller.look(0, 18)
-
-        self.assertFalse(any(call[0] == "get_vision" for call in self.session.calls))
 
     async def test_look_rejects_unreachable_downward_pitch(self):
         with self.assertRaisesRegex(ValueError, "between -40.0 and 20.0"):
@@ -393,8 +330,10 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
             }
         }
 
-        image = await self.controller.look(None, 20)
+        with patch("menlo_mcp.vision.asyncio.sleep") as sleep:
+            image = await self.controller.look(None, 20)
 
+        sleep.assert_awaited_once_with(5.0)
         _, parameters, _ = self.session.calls[-2]
         self.assertAlmostEqual(parameters["pitch"], math.radians(20))
         self.assertEqual(self.session.calls[-1][0], "get_vision")
