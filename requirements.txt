@@ -1,4 +1,5 @@
 menlo-robot-sdk[livekit]==0.3.0
+mcp>=1.27,<2
 pydantic==2.13.4
 pydantic-core==2.46.4
 python-dotenv==1.2.2
