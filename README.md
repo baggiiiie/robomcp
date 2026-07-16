@@ -50,14 +50,28 @@ Then ask the agent to call `start_robot`. Open the returned `viewer_url` in Chro
 and keep that tab visible: the SimpleSim runtime runs in the browser. Once the scene
 has loaded, the agent can use:
 
-- `get_scene`, `get_robot_state`, and `get_camera`
+- `get_scene`, `get_robot_state`, and `look`
 - `walk`, `turn`, `go_to`, and `stop`
-- `pick`, `place`, and `aim_head`
+- `pick` and verified `place`
 - `stop_robot` to delete the temporary robot and release the session
 
+`look(yaw_degrees?, pitch_degrees?)` replaces the separate camera and head tools.
+When angles are supplied it waits for measured head convergence before capturing;
+with no angles it captures the current view. `place` rejects source-table recycling
+unless `allow_recycle=true` is explicit, then refreshes the scene to verify the
+postcondition.
+
 `go_to(entity_id)` passes an exact scene entity ID to Menlo's native `go_to` skill.
-Menlo performs the A* route planning and obstacle avoidance; the MCP server does not
-plan the route itself.
+Menlo performs the A* route planning and obstacle avoidance. If navigation reports
+`NAVIGATION_STUCK`, the MCP retries at most twice and only after at least 10 cm of
+measured progress toward the target, runtime readiness, zero commanded velocity,
+and confirmation that navigation is inactive. A navigation timeout is cancelled
+and verified with the same stop checks used for velocity commands.
+
+Timed `walk` and `turn` failures trigger an immediate `cancel` followed by state
+polling. Their result reports `timed_out_stopped` only after the runtime is ready and
+all commanded velocities are zero; otherwise it reports
+`timed_out_motion_unconfirmed`.
 
 The project-local operating guidance is in
 `.agents/skills/menlo-robot-operator/SKILL.md`. It is scoped to this repository and

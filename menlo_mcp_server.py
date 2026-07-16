@@ -35,7 +35,65 @@ def _number(name: str, value: float, minimum: float, maximum: float) -> float:
 def _json(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json", exclude_none=True)
+    if isinstance(value, dict):
+        return {key: _json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json(item) for item in value]
+    if hasattr(value, "__dict__"):
+        return {
+            key: _json(item)
+            for key, item in vars(value).items()
+            if not key.startswith("_")
+        }
     return value
+
+
+def _action_status(response: dict[str, Any]) -> str | None:
+    result = response.get("result", {})
+    if not isinstance(result, dict):
+        return None
+    outer_status = result.get("status")
+    if outer_status and outer_status != "done":
+        return str(outer_status)
+    nested = result.get("result", {})
+    if isinstance(nested, dict) and nested.get("status"):
+        return str(nested["status"])
+    return str(outer_status) if outer_status else None
+
+
+def _action_error(response: dict[str, Any]) -> Any:
+    result = response.get("result", {})
+    if not isinstance(result, dict):
+        return None
+    nested = result.get("result", {})
+    if isinstance(nested, dict) and nested.get("error") is not None:
+        return nested["error"]
+    return result.get("error")
+
+
+def _contains_error_code(value: Any, code: str) -> bool:
+    if isinstance(value, str):
+        return code in value
+    if isinstance(value, dict):
+        return any(_contains_error_code(item, code) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_error_code(item, code) for item in value)
+    return False
+
+
+def _position_xy(entity: Any) -> tuple[float, float] | None:
+    data = _json(entity)
+    if not isinstance(data, dict):
+        return None
+    pose = data.get("pose", {})
+    position = pose.get("position", []) if isinstance(pose, dict) else []
+    if (
+        not isinstance(position, list)
+        or len(position) < 2
+        or not all(isinstance(value, (int, float)) for value in position[:2])
+    ):
+        return None
+    return float(position[0]), float(position[1])
 
 
 class MenloRobotController:
@@ -207,6 +265,26 @@ class MenloRobotController:
                 f"Unknown entity_id {entity_id!r}. Scene entities include: {preview}"
             )
 
+    async def _scene_entity(self, entity_id: str) -> dict[str, Any]:
+        scene = _json(await self._require_session().state.get("scene_state"))
+        entities = scene.get("entities", {})
+        for key, value in entities.items():
+            entity = _json(value)
+            if key == entity_id or entity.get("entity_id") == entity_id:
+                return entity
+        choices = sorted(
+            {str(key) for key in entities}
+            | {
+                str(_json(value).get("entity_id"))
+                for value in entities.values()
+                if _json(value).get("entity_id")
+            }
+        )
+        preview = ", ".join(choices[:20])
+        raise ValueError(
+            f"Unknown entity_id {entity_id!r}. Scene entities include: {preview}"
+        )
+
     async def _invoke(
         self, skill: str, parameters: dict[str, Any], *, timeout_s: float
     ) -> dict[str, Any]:
@@ -219,40 +297,249 @@ class MenloRobotController:
             response["state_warning"] = f"{type(exc).__name__}: {exc}"
         return response
 
+    @staticmethod
+    def _motion_is_stopped(
+        state: dict[str, Any], *, require_navigation_inactive: bool = False
+    ) -> bool:
+        runtime = state.get("runtime", {})
+        robot = state.get("robot", {})
+        extra = robot.get("extra", {}) if isinstance(robot, dict) else {}
+        command = extra.get("command", {}) if isinstance(extra, dict) else {}
+        navigation = extra.get("nav", {}) if isinstance(extra, dict) else {}
+        velocities = [
+            command.get(axis) if isinstance(command, dict) else None
+            for axis in ("vx", "vy", "wz")
+        ]
+        navigation_inactive = (
+            isinstance(navigation, dict) and navigation.get("active") is False
+            if require_navigation_inactive
+            else not (isinstance(navigation, dict) and navigation.get("active") is True)
+        )
+        return (
+            isinstance(runtime, dict)
+            and runtime.get("status") == "ready"
+            and navigation_inactive
+            and all(
+                isinstance(value, (int, float)) and abs(float(value)) <= 1e-4
+                for value in velocities
+            )
+        )
+
+    async def _wait_for_motion_stop(
+        self,
+        timeout_s: float = 5.0,
+        *,
+        require_navigation_inactive: bool = False,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        deadline = time.monotonic() + timeout_s
+        last_state: dict[str, Any] | None = None
+        last_error: str | None = None
+        while True:
+            try:
+                last_state = await self.robot_state()
+                last_error = None
+                if self._motion_is_stopped(
+                    last_state,
+                    require_navigation_inactive=require_navigation_inactive,
+                ):
+                    return last_state, None
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+            if time.monotonic() >= deadline:
+                return last_state, last_error
+            await asyncio.sleep(0.1)
+
+    async def _cancel_and_confirm_motion_stop(
+        self, *, require_navigation_inactive: bool
+    ) -> dict[str, Any]:
+        stop_response: dict[str, Any] | None = None
+        stop_error: str | None = None
+        try:
+            stop_response = await self.cancel()
+        except Exception as exc:
+            stop_error = f"{type(exc).__name__}: {exc}"
+
+        final_state, state_error = await self._wait_for_motion_stop(
+            require_navigation_inactive=require_navigation_inactive
+        )
+        stopped = final_state is not None and self._motion_is_stopped(
+            final_state,
+            require_navigation_inactive=require_navigation_inactive,
+        )
+        result: dict[str, Any] = {"motion_stopped": stopped}
+        if stop_response is not None:
+            result["stop_result"] = stop_response
+        if stop_error is not None:
+            result["stop_error"] = stop_error
+        if final_state is not None:
+            result["robot_state"] = final_state
+        if state_error is not None:
+            result["state_warning"] = state_error
+        return result
+
+    async def _recover_motion_timeout(
+        self,
+        action: str,
+        exc: TimeoutError,
+        *,
+        require_navigation_inactive: bool,
+    ) -> dict[str, Any]:
+        recovery = await self._cancel_and_confirm_motion_stop(
+            require_navigation_inactive=require_navigation_inactive
+        )
+        stopped = recovery["motion_stopped"] is True
+        response: dict[str, Any] = {
+            "action": action,
+            "status": (
+                "timed_out_stopped" if stopped else "timed_out_motion_unconfirmed"
+            ),
+            "error": f"{type(exc).__name__}: {exc}",
+            **recovery,
+        }
+        return response
+
+    async def _invoke_velocity(self, parameters: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await self._invoke("set_velocity", parameters, timeout_s=30)
+        except TimeoutError as exc:
+            return await self._recover_motion_timeout(
+                "set_velocity",
+                exc,
+                require_navigation_inactive=False,
+            )
+
     async def walk(
         self, forward_speed: float, lateral_speed: float, seconds: float
     ) -> dict[str, Any]:
-        return await self._invoke(
-            "set_velocity",
+        return await self._invoke_velocity(
             {
                 "vx": _number("forward_speed", forward_speed, -1.5, 1.5),
                 "vy": _number("lateral_speed", lateral_speed, -1.5, 1.5),
                 "wz": 0.0,
                 "duration_s": _number("seconds", seconds, 0.1, 10.0),
-            },
-            timeout_s=30,
+            }
         )
 
     async def turn(self, turn_speed: float, seconds: float) -> dict[str, Any]:
         turn_speed = _number("turn_speed", turn_speed, -0.6, 0.6)
-        return await self._invoke(
-            "set_velocity",
+        return await self._invoke_velocity(
             {
                 "vx": 0.2 if abs(turn_speed) > 0.05 else 0.0,
                 "vy": 0.0,
                 "wz": turn_speed,
                 "duration_s": _number("seconds", seconds, 0.1, 10.0),
-            },
-            timeout_s=30,
+            }
         )
 
     async def go_to(self, entity_id: str) -> dict[str, Any]:
-        await self._validate_entity(entity_id)
-        return await self._invoke(
-            "go_to",
-            {"target": {"kind": "entity", "entity_id": entity_id}},
-            timeout_s=300,
+        target = await self._scene_entity(entity_id)
+        target_position = _position_xy(target)
+        state_before = await self.robot_state()
+        robot_before = state_before.get("robot", {})
+        previous_position = _position_xy(robot_before)
+        previous_distance = (
+            math.dist(previous_position, target_position)
+            if previous_position is not None and target_position is not None
+            else None
         )
+        attempt_summaries: list[dict[str, Any]] = []
+
+        for attempt in range(1, 4):
+            try:
+                response = await self._invoke(
+                    "go_to",
+                    {"target": {"kind": "entity", "entity_id": entity_id}},
+                    timeout_s=300,
+                )
+            except TimeoutError as exc:
+                response = await self._recover_motion_timeout(
+                    "go_to",
+                    exc,
+                    require_navigation_inactive=True,
+                )
+                attempt_summaries.append(
+                    {
+                        "attempt": attempt,
+                        "status": response["status"],
+                        "error": response["error"],
+                        "progress_m": None,
+                        "retry_safe": False,
+                    }
+                )
+                response["navigation"] = {
+                    "status": response["status"],
+                    "attempts": attempt,
+                    "history": attempt_summaries,
+                }
+                return response
+
+            status = _action_status(response)
+            error = _action_error(response)
+            robot_state = response.get("robot_state", {})
+            robot_after = (
+                robot_state.get("robot", {}) if isinstance(robot_state, dict) else {}
+            )
+            position_after = _position_xy(robot_after)
+            distance_after = (
+                math.dist(position_after, target_position)
+                if position_after is not None and target_position is not None
+                else None
+            )
+            progress = (
+                previous_distance - distance_after
+                if previous_distance is not None and distance_after is not None
+                else None
+            )
+            retry_safe = isinstance(robot_state, dict) and self._motion_is_stopped(
+                robot_state, require_navigation_inactive=True
+            )
+            attempt_summaries.append(
+                {
+                    "attempt": attempt,
+                    "status": status,
+                    "error": error,
+                    "progress_m": progress,
+                    "retry_safe": retry_safe,
+                }
+            )
+
+            if status == "done":
+                response["navigation"] = {
+                    "status": "done",
+                    "attempts": attempt,
+                    "history": attempt_summaries,
+                }
+                return response
+
+            navigation_stuck = _contains_error_code(error, "NAVIGATION_STUCK")
+            meaningful_progress = progress is not None and progress >= 0.1
+            if (
+                not navigation_stuck
+                or not meaningful_progress
+                or not retry_safe
+                or attempt == 3
+            ):
+                stop_confirmation: dict[str, Any] | None = None
+                if not retry_safe:
+                    stop_confirmation = await self._cancel_and_confirm_motion_stop(
+                        require_navigation_inactive=True
+                    )
+                response["status"] = (
+                    "navigation_stuck" if navigation_stuck else "navigation_failed"
+                )
+                response["navigation"] = {
+                    "status": response["status"],
+                    "attempts": attempt,
+                    "history": attempt_summaries,
+                }
+                if stop_confirmation is not None:
+                    response["navigation"]["stop_confirmation"] = stop_confirmation
+                return response
+
+            previous_position = position_after
+            previous_distance = distance_after
+
+        raise AssertionError("unreachable")
 
     async def cancel(self) -> dict[str, Any]:
         return await self._invoke("cancel", {}, timeout_s=15)
@@ -281,9 +568,7 @@ class MenloRobotController:
             state_held_entity_ids = []
 
         held_entity_id = (
-            state_held_entity_ids[0]
-            if state_held_entity_ids
-            else result_held_entity_id
+            state_held_entity_ids[0] if state_held_entity_ids else result_held_entity_id
         )
         pick_matches_request = (
             entity_id in state_held_entity_ids
@@ -304,13 +589,132 @@ class MenloRobotController:
             )
         return response
 
-    async def place(self, entity_id: str) -> dict[str, Any]:
-        await self._validate_entity(entity_id)
-        return await self._invoke(
+    async def place(
+        self, entity_id: str, *, allow_recycle: bool = False
+    ) -> dict[str, Any]:
+        robot_state_before = await self.robot_state()
+        robot_before = robot_state_before.get("robot", {})
+        held_ids = robot_before.get("held_entity_ids", [])
+        if not isinstance(held_ids, list) or len(held_ids) != 1:
+            raise ValueError("Robot must be holding exactly one entity before place")
+        held_entity_id = held_ids[0]
+
+        target = await self._scene_entity(entity_id)
+        target_id = target.get("entity_id", entity_id)
+        if target.get("visible") is False:
+            raise ValueError(f"Cannot place onto invisible entity {entity_id!r}")
+        if target.get("attached_to"):
+            raise ValueError(f"Cannot place onto attached entity {entity_id!r}")
+
+        target_state = target.get("state", {})
+        if not isinstance(target_state, dict):
+            target_state = {}
+        target_parent_pad_id = target_state.get("parent_pad_id")
+        recycles_source = target_id == "pad_A" or target_parent_pad_id == "pad_A"
+        if recycles_source and not allow_recycle:
+            raise ValueError(
+                f"Placement target {entity_id!r} resolves to source pad_A and would "
+                "recycle the held entity. Pass allow_recycle=True only when that is "
+                "intentional."
+            )
+
+        expected_parent_pad_id = (
+            target_id if str(target_id).startswith("pad_") else target_parent_pad_id
+        )
+        if expected_parent_pad_id is None:
+            raise ValueError(
+                f"Placement target {entity_id!r} is not a pad or an entity on a pad"
+            )
+
+        response = await self._invoke(
             "place_entity",
             {"target": {"kind": "entity", "entity_id": entity_id}},
             timeout_s=60,
         )
+
+        native_status = _action_status(response)
+        if native_status != "done":
+            response["status"] = "place_failed"
+            return response
+
+        scene_after = _json(await self._require_session().state.get("scene_state"))
+        entities_after = scene_after.get("entities", {})
+        placed_entity: dict[str, Any] | None = None
+        for key, value in entities_after.items():
+            candidate = _json(value)
+            if key == held_entity_id or candidate.get("entity_id") == held_entity_id:
+                placed_entity = candidate
+                break
+
+        robot_state_after = response.get("robot_state", {})
+        robot_after = (
+            robot_state_after.get("robot", {})
+            if isinstance(robot_state_after, dict)
+            else {}
+        )
+        held_after = (
+            robot_after.get("held_entity_ids", [])
+            if isinstance(robot_after, dict)
+            else []
+        )
+        placement = {
+            "held_entity_id": held_entity_id,
+            "target_entity_id": target_id,
+            "expected_parent_pad_id": expected_parent_pad_id,
+        }
+        response["placement"] = placement
+
+        if held_entity_id in held_after:
+            placement["status"] = "still_held"
+            response["status"] = "unexpected_place"
+            response["message"] = (
+                f"Runtime reported placement done, but {held_entity_id!r} is still held."
+            )
+            return response
+        if placed_entity is None:
+            placement["status"] = "missing"
+            response["status"] = "unexpected_place"
+            response["message"] = (
+                f"Runtime reported placement done, but {held_entity_id!r} is absent "
+                "from the refreshed scene."
+            )
+            return response
+
+        placed_state = placed_entity.get("state", {})
+        if not isinstance(placed_state, dict):
+            placed_state = {}
+        actual_parent_pad_id = placed_state.get("parent_pad_id")
+        placement.update(
+            {
+                "actual_parent_pad_id": actual_parent_pad_id,
+                "visible": placed_entity.get("visible"),
+            }
+        )
+        if recycles_source:
+            recycled = (
+                placed_entity.get("visible") is False and actual_parent_pad_id is None
+            )
+            placement["status"] = "recycled" if recycled else "unexpected"
+            if not recycled:
+                response["status"] = "unexpected_place"
+                response["message"] = (
+                    "Source recycling was requested, but the refreshed scene did not "
+                    "show the expected recycled state."
+                )
+            return response
+
+        verified = (
+            placed_entity.get("visible") is not False
+            and actual_parent_pad_id == expected_parent_pad_id
+        )
+        placement["status"] = "verified" if verified else "unexpected"
+        if not verified:
+            response["status"] = "unexpected_place"
+            response["message"] = (
+                f"Runtime reported placement done, but {held_entity_id!r} is on "
+                f"{actual_parent_pad_id!r}, expected {expected_parent_pad_id!r}."
+            )
+        return response
 
     async def aim_head(
         self, yaw_degrees: float | None, pitch_degrees: float | None
@@ -327,6 +731,45 @@ class MenloRobotController:
                 _number("pitch_degrees", pitch_degrees, -40, 40)
             )
         return await self._invoke("set_head", parameters, timeout_s=15)
+
+    async def look(
+        self, yaw_degrees: float | None, pitch_degrees: float | None
+    ) -> bytes:
+        requested: dict[str, float] = {}
+        if yaw_degrees is not None:
+            requested["yaw"] = math.radians(
+                _number("yaw_degrees", yaw_degrees, -80, 80)
+            )
+        if pitch_degrees is not None:
+            requested["pitch"] = math.radians(
+                _number("pitch_degrees", pitch_degrees, -40, 40)
+            )
+        if requested:
+            head_response = await self.aim_head(yaw_degrees, pitch_degrees)
+            if _action_status(head_response) != "done":
+                error = _action_error(head_response)
+                raise RuntimeError(f"Head aim failed: {error!r}")
+            deadline = time.monotonic() + 3.0
+            tolerance = math.radians(2.0)
+            while True:
+                state = await self.robot_state()
+                robot = state.get("robot", {})
+                extra = robot.get("extra", {}) if isinstance(robot, dict) else {}
+                head = extra.get("head", {}) if isinstance(extra, dict) else {}
+                measured = head.get("measured", {}) if isinstance(head, dict) else {}
+                converged = all(
+                    isinstance(measured.get(axis), (int, float))
+                    and abs(float(measured[axis]) - target) <= tolerance
+                    for axis, target in requested.items()
+                )
+                if converged:
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "Head did not converge to the requested angles before capture"
+                    )
+                await asyncio.sleep(0.1)
+        return await self.camera()
 
 
 controller = MenloRobotController()
@@ -368,9 +811,12 @@ async def get_robot_state() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def get_camera() -> Image:
-    """Capture the robot's current point-of-view camera as a JPEG image."""
-    return Image(data=await controller.camera(), format="jpeg")
+async def look(
+    yaw_degrees: float | None = None,
+    pitch_degrees: float | None = None,
+) -> Image:
+    """Optionally aim the head, wait for convergence, then capture a JPEG image."""
+    return Image(data=await controller.look(yaw_degrees, pitch_degrees), format="jpeg")
 
 
 @mcp.tool()
@@ -408,18 +854,9 @@ async def pick(entity_id: str = "cube") -> dict[str, Any]:
 
 
 @mcp.tool()
-async def place(entity_id: str) -> dict[str, Any]:
-    """Place the held object at an exact scene entity or zone ID."""
-    return await controller.place(entity_id)
-
-
-@mcp.tool()
-async def aim_head(
-    yaw_degrees: float | None = None,
-    pitch_degrees: float | None = None,
-) -> dict[str, Any]:
-    """Aim the head/camera in degrees. Positive yaw is left; positive pitch is down."""
-    return await controller.aim_head(yaw_degrees, pitch_degrees)
+async def place(entity_id: str, allow_recycle: bool = False) -> dict[str, Any]:
+    """Place and verify an object; source recycling requires explicit opt-in."""
+    return await controller.place(entity_id, allow_recycle=allow_recycle)
 
 
 if __name__ == "__main__":

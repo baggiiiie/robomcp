@@ -31,14 +31,13 @@ class MCPProtocolTests(unittest.IsolatedAsyncioTestCase):
                 "stop_robot",
                 "get_scene",
                 "get_robot_state",
-                "get_camera",
+                "look",
                 "walk",
                 "turn",
                 "go_to",
                 "stop",
                 "pick",
                 "place",
-                "aim_head",
             },
         )
         tools = {tool.name: tool for tool in result.tools}
@@ -48,6 +47,10 @@ class MCPProtocolTests(unittest.IsolatedAsyncioTestCase):
             0.0,
         )
         self.assertEqual(tools["go_to"].inputSchema["required"], ["entity_id"])
+        self.assertEqual(
+            tools["place"].inputSchema["properties"]["allow_recycle"]["default"],
+            False,
+        )
         self.assertTrue(before_start.isError)
         self.assertIn("Call start_robot first", before_start.content[0].text)
 

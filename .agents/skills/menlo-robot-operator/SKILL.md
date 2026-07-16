@@ -18,15 +18,15 @@ Use the project-scoped `menlo-robot` MCP tools for robot tasks in this repositor
 
 - Do not treat MCP `isError: false` as action success by itself. Inspect the nested action `result.status` and `result.error`.
 - After navigation, confirm the nested status is `done`. A failed `go_to` can still change the robot pose.
-- If `go_to` reports `NAVIGATION_STUCK`, refresh state and retry from the new pose once or twice. Stop escalating if the pose is not making meaningful progress.
+- `go_to` automatically retries `NAVIGATION_STUCK` at most twice when measured progress toward the target is at least 0.1 m and the previous navigation is confirmed inactive with zero commanded velocity. It cancels and verifies motion after a navigation timeout. Inspect `navigation.history`; do not add further retries after `navigation_stuck`.
 
 ## Find and pick an object by appearance
 
 Use this sequence for color or visual requests:
 
 1. Reach the requested area with `go_to`.
-2. Call `get_camera` before using scene color metadata to select an object.
-3. If the target is absent, scan with `aim_head` using a small set of deliberate yaw positions, keeping a downward pitch when looking at the conveyor or pad.
+2. Call `look` before using scene color metadata to select an object.
+3. If the target is absent, scan with `look` using a small set of deliberate yaw positions, keeping a downward pitch when looking at the conveyor or pad. The tool waits for head convergence before capturing.
 4. If head scanning is insufficient, reposition to a midpoint entity or another safe viewpoint, then capture again.
 5. Once the target is visibly identified, refresh `get_scene` and map the observed object to an exact entity ID.
 6. Approach that exact entity with `go_to` before `pick`; otherwise the runtime may choose a nearer reachable object.
@@ -43,18 +43,17 @@ Menlo velocity commands are persistent upstream: a command can keep moving until
 
 If a velocity tool times out:
 
-1. Assume the robot may still be moving.
-2. Call `get_robot_state` immediately.
-3. If the runtime is busy or command velocity is nonzero, call `stop` immediately.
-4. Confirm the runtime is ready and commanded velocities are zero before any other action.
+1. The MCP calls `stop` automatically and polls robot state.
+2. Continue only when the returned status is `timed_out_stopped` and `motion_stopped` is true.
+3. Treat `timed_out_motion_unconfirmed` as unsafe: call `stop` again and inspect `get_robot_state` before any other action.
 
 Do not retry a timed velocity command after a timeout without first stopping it.
 
 ## Placement semantics
 
 - `place` requires an exact scene entity or pad ID; there is no neutral free-space drop tool.
-- Placing onto source `pad_A` recycles the held cube, advances the source sequence, and can shift entity positions. It does not restore the original arrangement.
-- Refresh `get_scene` after every placement before referring to cube IDs or row order.
+- Placing onto source `pad_A` recycles the held cube, advances the source sequence, and can shift entity positions. It does not restore the original arrangement. The MCP rejects this by default; pass `allow_recycle=true` only when recycling is intentional.
+- Inspect the returned `placement.status`. Treat `unexpected_place` as a failed postcondition. The MCP refreshes the scene after placement, but call `get_scene` again before referring to cube IDs or row order.
 
 ## Diagnostics
 
