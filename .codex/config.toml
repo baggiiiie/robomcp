@@ -1,0 +1,5 @@
+[mcp_servers.menlo-robot]
+command = "/private/tmp/menlo/.venv/bin/python"
+args = ["/private/tmp/menlo/menlo_mcp_server.py"]
+cwd = "/private/tmp/menlo"
+tool_timeout_sec = 330
