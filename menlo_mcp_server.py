@@ -26,6 +26,14 @@ MODEL = "asimov-v0"
 
 HEAD_PITCH_MIN_DEGREES = -40.0
 HEAD_PITCH_MAX_DEGREES = 20.0
+HEAD_CONVERGENCE_TOLERANCE_DEGREES = 2.0
+HEAD_CONVERGENCE_MIN_SECONDS = 3.0
+HEAD_CONVERGENCE_MAX_SECONDS = 25.0
+HEAD_CONVERGENCE_MARGIN_SECONDS = 1.5
+HEAD_CONVERGENCE_STALL_SECONDS = 2.5
+HEAD_CONVERGENCE_PROGRESS_DEGREES = 0.25
+HEAD_ESTIMATED_YAW_RATE_DEGREES_PER_SECOND = 10.0
+HEAD_ESTIMATED_PITCH_RATE_DEGREES_PER_SECOND = 3.0
 
 
 def _number(name: str, value: float, minimum: float, maximum: float) -> float:
@@ -35,6 +43,50 @@ def _number(name: str, value: float, minimum: float, maximum: float) -> float:
     if not math.isfinite(value) or not minimum <= value <= maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return value
+
+
+def _head_measurement(state: dict[str, Any]) -> dict[str, float]:
+    robot = state.get("robot", {})
+    extra = robot.get("extra", {}) if isinstance(robot, dict) else {}
+    head = extra.get("head", {}) if isinstance(extra, dict) else {}
+    measured = head.get("measured", {}) if isinstance(head, dict) else {}
+    if not isinstance(measured, dict):
+        return {}
+    return {
+        axis: float(value)
+        for axis, value in measured.items()
+        if axis in {"yaw", "pitch"}
+        and not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    }
+
+
+def _head_error(
+    requested: dict[str, float], measured: dict[str, float]
+) -> float | None:
+    if not all(axis in measured for axis in requested):
+        return None
+    return max(abs(measured[axis] - target) for axis, target in requested.items())
+
+
+def _head_convergence_timeout_s(
+    requested: dict[str, float], measured: dict[str, float]
+) -> float:
+    rates = {
+        "yaw": math.radians(HEAD_ESTIMATED_YAW_RATE_DEGREES_PER_SECOND),
+        "pitch": math.radians(HEAD_ESTIMATED_PITCH_RATE_DEGREES_PER_SECOND),
+    }
+    if not all(axis in measured for axis in requested):
+        return HEAD_CONVERGENCE_MAX_SECONDS
+    travel_seconds = max(
+        abs(measured[axis] - target) / rates[axis] for axis, target in requested.items()
+    )
+    estimate = HEAD_CONVERGENCE_MARGIN_SECONDS + travel_seconds
+    return min(
+        max(estimate, HEAD_CONVERGENCE_MIN_SECONDS),
+        HEAD_CONVERGENCE_MAX_SECONDS,
+    )
 
 
 def _json(value: Any) -> Any:
@@ -871,28 +923,35 @@ class MenloRobotController:
                 )
             )
         if requested:
+            initial_measured = _head_measurement(await self.robot_state())
+            convergence_timeout_s = _head_convergence_timeout_s(
+                requested, initial_measured
+            )
             head_response = await self.aim_head(yaw_degrees, pitch_degrees)
             if _action_status(head_response) != "done":
                 error = _action_error(head_response)
                 raise RuntimeError(f"Head aim failed: {error!r}")
-            deadline = time.monotonic() + 3.0
-            tolerance = math.radians(2.0)
+            started = time.monotonic()
+            deadline = started + convergence_timeout_s
+            last_progress_at = started
+            best_error = _head_error(requested, initial_measured)
+            tolerance = math.radians(HEAD_CONVERGENCE_TOLERANCE_DEGREES)
+            progress_threshold = math.radians(HEAD_CONVERGENCE_PROGRESS_DEGREES)
             while True:
                 state = await self.robot_state()
-                robot = state.get("robot", {})
-                extra = robot.get("extra", {}) if isinstance(robot, dict) else {}
-                head = extra.get("head", {}) if isinstance(extra, dict) else {}
-                measured = head.get("measured", {}) if isinstance(head, dict) else {}
-                if not isinstance(measured, dict):
-                    measured = {}
-                converged = all(
-                    isinstance(measured.get(axis), (int, float))
-                    and abs(float(measured[axis]) - target) <= tolerance
-                    for axis, target in requested.items()
-                )
-                if converged:
+                measured = _head_measurement(state)
+                error = _head_error(requested, measured)
+                if error is not None and error <= tolerance:
                     break
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                if error is not None and (
+                    best_error is None or error <= best_error - progress_threshold
+                ):
+                    best_error = error
+                    last_progress_at = now
+                timed_out = now >= deadline
+                stalled = now - last_progress_at >= HEAD_CONVERGENCE_STALL_SECONDS
+                if timed_out or stalled:
                     target_degrees = {
                         axis: round(math.degrees(value), 1)
                         for axis, value in requested.items()
@@ -902,9 +961,11 @@ class MenloRobotController:
                         for axis, value in measured.items()
                         if isinstance(value, (int, float)) and math.isfinite(value)
                     }
+                    reason = "timed out" if timed_out else "stalled"
                     raise TimeoutError(
-                        "Head did not converge before capture within 3.0s "
-                        f"(target_degrees={target_degrees}, "
+                        f"Head convergence {reason} before capture "
+                        f"(adaptive_timeout_s={convergence_timeout_s:.1f}, "
+                        f"target_degrees={target_degrees}, "
                         f"measured_degrees={measured_degrees})"
                     )
                 await asyncio.sleep(0.1)
