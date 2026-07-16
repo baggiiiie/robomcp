@@ -58,9 +58,12 @@ has loaded, the agent can use:
 
 `look(yaw_degrees?, pitch_degrees?)` replaces the separate camera and head tools.
 When angles are supplied it waits for measured head convergence before capturing;
-with no angles it captures the current view. `place` rejects source-table recycling
-unless `allow_recycle=true` is explicit, then refreshes the scene to verify the
-postcondition.
+positive pitch looks down and negative pitch looks up. For the current SimpleSim
+model, pitch is limited to -40 degrees up through +20 degrees down because larger
+positive targets saturate near +19.3 degrees even though runtime state advertises a
+larger range. With no angles it captures the current view. `place` rejects
+source-table recycling unless `allow_recycle=true` is explicit, then refreshes the
+scene to verify the postcondition.
 
 `go_to(entity_id)` passes an exact scene entity ID to Menlo's native `go_to` skill.
 Menlo performs the A* route planning and obstacle avoidance. If navigation reports

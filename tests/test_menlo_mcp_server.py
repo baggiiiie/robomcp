@@ -310,6 +310,27 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.calls[-1][0], "get_vision")
         self.assertEqual(image, b"jpeg")
 
+    async def test_look_rejects_unreachable_downward_pitch(self):
+        with self.assertRaisesRegex(ValueError, "between -40.0 and 20.0"):
+            await self.controller.look(-65, 25)
+
+        self.assertEqual(self.session.calls, [])
+
+    async def test_look_accepts_reachable_downward_pitch_limit(self):
+        self.session.state.robot_status = {
+            "robot": {
+                "status": "ready",
+                "extra": {"head": {"measured": {"pitch": math.radians(20)}}},
+            }
+        }
+
+        image = await self.controller.look(None, 20)
+
+        _, parameters, _ = self.session.calls[-2]
+        self.assertAlmostEqual(parameters["pitch"], math.radians(20))
+        self.assertEqual(self.session.calls[-1][0], "get_vision")
+        self.assertEqual(image, b"jpeg")
+
     async def test_look_without_angles_only_captures(self):
         image = await self.controller.look(None, None)
 

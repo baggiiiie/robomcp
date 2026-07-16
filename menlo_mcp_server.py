@@ -24,6 +24,9 @@ RCS_URL = "https://api.menlo.ai/rcs"
 VIEWER_BASE_URL = "https://sim.menlo.ai"
 MODEL = "asimov-v0"
 
+HEAD_PITCH_MIN_DEGREES = -40.0
+HEAD_PITCH_MAX_DEGREES = 20.0
+
 
 def _number(name: str, value: float, minimum: float, maximum: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -816,7 +819,12 @@ class MenloRobotController:
             )
         if pitch_degrees is not None:
             parameters["pitch"] = math.radians(
-                _number("pitch_degrees", pitch_degrees, -40, 40)
+                _number(
+                    "pitch_degrees",
+                    pitch_degrees,
+                    HEAD_PITCH_MIN_DEGREES,
+                    HEAD_PITCH_MAX_DEGREES,
+                )
             )
         return await self._invoke("set_head", parameters, timeout_s=15)
 
@@ -830,7 +838,12 @@ class MenloRobotController:
             )
         if pitch_degrees is not None:
             requested["pitch"] = math.radians(
-                _number("pitch_degrees", pitch_degrees, -40, 40)
+                _number(
+                    "pitch_degrees",
+                    pitch_degrees,
+                    HEAD_PITCH_MIN_DEGREES,
+                    HEAD_PITCH_MAX_DEGREES,
+                )
             )
         if requested:
             head_response = await self.aim_head(yaw_degrees, pitch_degrees)
@@ -845,6 +858,8 @@ class MenloRobotController:
                 extra = robot.get("extra", {}) if isinstance(robot, dict) else {}
                 head = extra.get("head", {}) if isinstance(extra, dict) else {}
                 measured = head.get("measured", {}) if isinstance(head, dict) else {}
+                if not isinstance(measured, dict):
+                    measured = {}
                 converged = all(
                     isinstance(measured.get(axis), (int, float))
                     and abs(float(measured[axis]) - target) <= tolerance
@@ -853,8 +868,19 @@ class MenloRobotController:
                 if converged:
                     break
                 if time.monotonic() >= deadline:
+                    target_degrees = {
+                        axis: round(math.degrees(value), 1)
+                        for axis, value in requested.items()
+                    }
+                    measured_degrees = {
+                        axis: round(math.degrees(value), 1)
+                        for axis, value in measured.items()
+                        if isinstance(value, (int, float)) and math.isfinite(value)
+                    }
                     raise TimeoutError(
-                        "Head did not converge to the requested angles before capture"
+                        "Head did not converge before capture within 3.0s "
+                        f"(target_degrees={target_degrees}, "
+                        f"measured_degrees={measured_degrees})"
                     )
                 await asyncio.sleep(0.1)
         return await self.camera()
@@ -903,7 +929,7 @@ async def look(
     yaw_degrees: float | None = None,
     pitch_degrees: float | None = None,
 ) -> Image:
-    """Optionally aim the head, wait for convergence, then capture a JPEG image."""
+    """Optionally aim and capture JPEG; SimpleSim pitch is -40° up to +20° down."""
     return Image(data=await controller.look(yaw_degrees, pitch_degrees), format="jpeg")
 
 
