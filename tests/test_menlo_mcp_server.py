@@ -8,17 +8,21 @@ from menlo_mcp_server import MenloRobotController, _number
 
 
 class FakeState:
+    def __init__(self) -> None:
+        self.robot_status: dict = {"robot": {"status": "ready"}}
+
     async def get(self, name: str):
         if name == "scene_state":
             entity = SimpleNamespace(entity_id="cube_4")
             return SimpleNamespace(entities={"cube_4": entity})
-        return {"robot": {"status": "ready"}}
+        return self.robot_status
 
 
 class FakeSession:
     def __init__(self) -> None:
         self.state = FakeState()
         self.calls: list[tuple[str, dict, float | None]] = []
+        self.invoke_result: dict = {"status": "done"}
 
     async def discover_skills(self):
         return [
@@ -35,7 +39,7 @@ class FakeSession:
 
     async def invoke(self, skill, parameters, *, timeout_s=None):
         self.calls.append((skill, parameters, timeout_s))
-        return {"status": "done"}
+        return self.invoke_result
 
 
 class FakeRobots:
@@ -119,6 +123,62 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
 
         await self.controller.cancel()
         self.assertEqual(self.session.calls[-1][0:2], ("cancel", {}))
+
+    async def test_exact_pick_reports_unexpected_held_entity(self):
+        self.session.invoke_result = {
+            "status": "done",
+            "result": {"status": "done", "held": "cube_0", "held_count": 1},
+        }
+
+        response = await self.controller.pick("cube_4")
+
+        self.assertEqual(
+            self.session.calls[-1][0:2],
+            (
+                "pick_entity",
+                {"target": {"kind": "entity", "entity_id": "cube_4"}},
+            ),
+        )
+        self.assertEqual(response["status"], "unexpected_pick")
+        self.assertEqual(response["requested_entity_id"], "cube_4")
+        self.assertEqual(response["held_entity_id"], "cube_0")
+        self.assertIn("requested cube_4", response["message"])
+
+    async def test_exact_pick_accepts_requested_held_entity(self):
+        self.session.invoke_result = {
+            "status": "done",
+            "result": {"status": "done", "held": "cube_4", "held_count": 1},
+        }
+
+        response = await self.controller.pick("cube_4")
+
+        self.assertNotIn("status", response)
+        self.assertNotIn("requested_entity_id", response)
+
+    async def test_exact_pick_prefers_final_robot_state(self):
+        self.session.invoke_result = {
+            "status": "done",
+            "result": {"status": "done", "held": "cube_4", "held_count": 1},
+        }
+        self.session.state.robot_status = {
+            "robot": {"status": "holding", "held_entity_ids": ["cube_0"]}
+        }
+
+        response = await self.controller.pick("cube_4")
+
+        self.assertEqual(response["status"], "unexpected_pick")
+        self.assertEqual(response["held_entity_id"], "cube_0")
+
+    async def test_cube_alias_accepts_any_held_cube(self):
+        self.session.invoke_result = {
+            "status": "done",
+            "result": {"status": "done", "held": "cube_0", "held_count": 1},
+        }
+
+        response = await self.controller.pick("cube")
+
+        self.assertNotIn("status", response)
+        self.assertNotIn("requested_entity_id", response)
 
     async def test_aim_head_requires_at_least_one_angle(self):
         with self.assertRaisesRegex(ValueError, "Provide yaw_degrees"):

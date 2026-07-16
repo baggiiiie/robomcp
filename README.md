@@ -59,6 +59,24 @@ has loaded, the agent can use:
 Menlo performs the A* route planning and obstacle avoidance; the MCP server does not
 plan the route itself.
 
+The project-local operating guidance is in
+`.agents/skills/menlo-robot-operator/SKILL.md`. It is scoped to this repository and
+is discovered only when Codex is working in this project.
+
+## Reproduce an upstream exact-pick mismatch
+
+Run the direct-SDK reproduction without the MCP server:
+
+```bash
+.venv/bin/python scripts/reproduce_upstream_pick_mismatch.py
+```
+
+Open the printed viewer URL and keep it visible. The script prints the live runtime
+schemas, navigates to pad A, and calls `MenloSession.invoke("pick_entity", ...)`
+directly. It exits successfully only when the runtime holds an entity other than the
+exact requested ID, demonstrating that the mismatch occurred below the MCP boundary.
+The temporary robot is deleted during cleanup.
+
 ## Run the notebook
 
 ```bash

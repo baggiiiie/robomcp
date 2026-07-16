@@ -259,11 +259,50 @@ class MenloRobotController:
 
     async def pick(self, entity_id: str) -> dict[str, Any]:
         await self._validate_entity(entity_id, allow_cube_alias=True)
-        return await self._invoke(
+        response = await self._invoke(
             "pick_entity",
             {"target": {"kind": "entity", "entity_id": entity_id}},
             timeout_s=60,
         )
+        if entity_id == "cube":
+            return response
+
+        result = response.get("result", {})
+        action_result = result.get("result", {}) if isinstance(result, dict) else {}
+        result_held_entity_id = (
+            action_result.get("held") if isinstance(action_result, dict) else None
+        )
+        robot_state = response.get("robot_state", {})
+        robot = robot_state.get("robot", {}) if isinstance(robot_state, dict) else {}
+        state_held_entity_ids = (
+            robot.get("held_entity_ids", []) if isinstance(robot, dict) else []
+        )
+        if not isinstance(state_held_entity_ids, list):
+            state_held_entity_ids = []
+
+        held_entity_id = (
+            state_held_entity_ids[0]
+            if state_held_entity_ids
+            else result_held_entity_id
+        )
+        pick_matches_request = (
+            entity_id in state_held_entity_ids
+            if state_held_entity_ids
+            else held_entity_id == entity_id
+        )
+        if held_entity_id and not pick_matches_request:
+            response.update(
+                {
+                    "status": "unexpected_pick",
+                    "requested_entity_id": entity_id,
+                    "held_entity_id": held_entity_id,
+                    "message": (
+                        "Picked up an unexpected item: requested "
+                        f"{entity_id}, but the runtime picked {held_entity_id}."
+                    ),
+                }
+            )
+        return response
 
     async def place(self, entity_id: str) -> dict[str, Any]:
         await self._validate_entity(entity_id)
