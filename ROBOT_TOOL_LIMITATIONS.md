@@ -22,6 +22,8 @@ directly and generally forwards the runtime result unchanged.
 | Navigation can fail after changing pose | Upstream planner behavior; mitigated in MCP | `go_to` may return `NAVIGATION_STUCK` after partial movement. MCP now retries at most twice only when target-distance progress is at least 0.1 m and prior navigation is confirmed stopped. Navigation timeouts are cancelled and verified, and all attempts are summarized. |
 | Camera and scene identity are not fused | MCP capability gap | `look` waits for optional head convergence and returns pixels, while `get_scene` returns IDs/metadata separately. Appearance-based selection still requires the caller to map a visual object to an exact entity. |
 | One temporary robot per MCP process | MCP design choice | The controller owns a single session and `start_robot` returns `already_running` until it is stopped. This is acceptable for learning, but not multi-robot operation. |
+| Executable plans cannot inspect images mid-plan | Deliberate MCP safety boundary | `menlo_execute` composes structured reads and guarded actions, but excludes `look`. The model must inspect camera output between plan segments before making an appearance-dependent choice. |
+| Executable plans are intentionally not arbitrary Python | Deliberate MCP security boundary | A restricted AST interpreter validates the full plan before motion and enforces call, statement, loop, source, output, and elapsed-time budgets. Imports, user functions, arbitrary attributes, filesystem/network access, lifecycle operations, and raw SDK access are unavailable. |
 
 ## Recommended changes
 
@@ -35,7 +37,9 @@ directly and generally forwards the runtime result unchanged.
 Implemented MCP mitigations: `look` now combines head aiming, convergence waiting,
 and capture; `place` now requires explicit source-recycle intent and verifies the
 refreshed-scene postcondition; velocity timeouts now trigger cancellation and
-zero-velocity verification; stuck navigation retries are bounded and progress-aware.
+zero-velocity verification; stuck navigation retries are bounded and progress-aware;
+`menlo_execute` now provides bounded, traceable composition and aborts on failed
+action postconditions.
 
 Until coordinate/slot placement exists, the safe supported workflow is navigation,
 camera/scene inspection, verified picking, and placement onto explicit destination

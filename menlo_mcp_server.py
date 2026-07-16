@@ -17,6 +17,8 @@ from menlo_robot_sdk import AsyncClient, connect
 from menlo_robot_sdk.connection import MenloSession
 from menlo_robot_sdk.experimental import generate_room_key
 
+from menlo_code_mode import MenloCodeExecutor, PlanActionError
+
 
 RCS_URL = "https://api.menlo.ai/rcs"
 VIEWER_BASE_URL = "https://sim.menlo.ai"
@@ -551,7 +553,7 @@ class MenloRobotController:
             {"target": {"kind": "entity", "entity_id": entity_id}},
             timeout_s=60,
         )
-        if entity_id == "cube":
+        if _action_status(response) != "done":
             return response
 
         result = response.get("result", {})
@@ -570,6 +572,21 @@ class MenloRobotController:
         held_entity_id = (
             state_held_entity_ids[0] if state_held_entity_ids else result_held_entity_id
         )
+        if not held_entity_id:
+            response.update(
+                {
+                    "status": "unexpected_pick",
+                    "requested_entity_id": entity_id,
+                    "held_entity_id": None,
+                    "message": (
+                        "Runtime reported the pick done, but no held entity was "
+                        "confirmed."
+                    ),
+                }
+            )
+            return response
+        if entity_id == "cube":
+            return response
         pick_matches_request = (
             entity_id in state_held_entity_ids
             if state_held_entity_ids
@@ -592,6 +609,8 @@ class MenloRobotController:
     async def place(
         self, entity_id: str, *, allow_recycle: bool = False
     ) -> dict[str, Any]:
+        if not isinstance(allow_recycle, bool):
+            raise ValueError("allow_recycle must be a boolean")
         robot_state_before = await self.robot_state()
         robot_before = robot_state_before.get("robot", {})
         held_ids = robot_before.get("held_entity_ids", [])
@@ -715,6 +734,75 @@ class MenloRobotController:
                 f"{actual_parent_pad_id!r}, expected {expected_parent_pad_id!r}."
             )
         return response
+
+    async def execute_code(self, code: str) -> dict[str, Any]:
+        """Run a bounded executable plan over guarded controller operations."""
+        executor = MenloCodeExecutor(self._execute_code_call)
+        return await executor.execute(code)
+
+    async def _execute_code_call(
+        self, method: str, arguments: list[Any], keywords: dict[str, Any]
+    ) -> Any:
+        operations = {
+            "get_robot_state": self.robot_state,
+            "get_scene": self.scene,
+            "go_to": self.go_to,
+            "pick": self.pick,
+            "place": self.place,
+            "stop": self.cancel,
+            "turn": self.turn,
+            "walk": self.walk,
+        }
+        operation = operations[method]
+        result = await operation(*arguments, **keywords)
+        if method in {"get_robot_state", "get_scene"}:
+            return result
+
+        failure: str | None = None
+        if method == "go_to":
+            navigation = result.get("navigation", {})
+            if navigation.get("status") != "done":
+                failure = f"navigation status is {navigation.get('status')!r}"
+        elif method == "pick":
+            if result.get("status") == "unexpected_pick":
+                failure = result.get("message", "picked an unexpected entity")
+            elif _action_status(result) != "done":
+                failure = f"pick status is {_action_status(result)!r}"
+        elif method == "place":
+            placement = result.get("placement", {})
+            if placement.get("status") not in {"verified", "recycled"}:
+                failure = result.get(
+                    "message",
+                    f"placement status is {placement.get('status')!r}",
+                )
+        elif method in {"walk", "turn"}:
+            status = result.get("status")
+            if isinstance(status, str) and status.startswith("timed_out_"):
+                failure = f"motion status is {status!r}"
+            elif _action_status(result) != "done":
+                failure = f"motion status is {_action_status(result)!r}"
+        elif method == "stop":
+            if _action_status(result) != "done":
+                failure = f"stop status is {_action_status(result)!r}"
+            else:
+                final_state, state_error = await self._wait_for_motion_stop(
+                    require_navigation_inactive=True
+                )
+                stopped = final_state is not None and self._motion_is_stopped(
+                    final_state, require_navigation_inactive=True
+                )
+                result["stop_confirmation"] = {
+                    "motion_stopped": stopped,
+                    "robot_state": final_state,
+                }
+                if state_error is not None:
+                    result["stop_confirmation"]["state_warning"] = state_error
+                if not stopped:
+                    failure = "motion did not reach a confirmed stopped state"
+
+        if failure is not None:
+            raise PlanActionError(method, failure, result)
+        return result
 
     async def aim_head(
         self, yaw_degrees: float | None, pitch_degrees: float | None
@@ -857,6 +945,21 @@ async def pick(entity_id: str = "cube") -> dict[str, Any]:
 async def place(entity_id: str, allow_recycle: bool = False) -> dict[str, Any]:
     """Place and verify an object; source recycling requires explicit opt-in."""
     return await controller.place(entity_id, allow_recycle=allow_recycle)
+
+
+@mcp.tool()
+async def menlo_execute(code: str) -> dict[str, Any]:
+    """Execute a high-confidence robot plan in a restricted Python subset.
+
+    Write synchronous-looking calls such as ``menlo.go_to("pad_B")``; do not use
+    ``await``. Allowed methods are get_robot_state, get_scene, go_to, pick, place,
+    stop, turn, and walk. Assignments, if/for, return, assert, comparisons, indexing,
+    and basic pure builtins are supported. Imports, functions, arbitrary attributes,
+    filesystem/network access, lifecycle calls, and camera capture are prohibited.
+    The plan is validated before motion, bounded by operation/loop/time budgets, and
+    stops immediately when a guarded action fails its postcondition.
+    """
+    return await controller.execute_code(code)
 
 
 if __name__ == "__main__":

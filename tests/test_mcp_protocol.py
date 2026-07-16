@@ -22,6 +22,9 @@ class MCPProtocolTests(unittest.IsolatedAsyncioTestCase):
                 result = await session.list_tools()
 
                 before_start = await session.call_tool("get_robot_state", {})
+                code_result = await session.call_tool(
+                    "menlo_execute", {"code": 'return {"ok": True}'}
+                )
 
         names = {tool.name for tool in result.tools}
         self.assertEqual(
@@ -38,6 +41,7 @@ class MCPProtocolTests(unittest.IsolatedAsyncioTestCase):
                 "stop",
                 "pick",
                 "place",
+                "menlo_execute",
             },
         )
         tools = {tool.name: tool for tool in result.tools}
@@ -51,8 +55,11 @@ class MCPProtocolTests(unittest.IsolatedAsyncioTestCase):
             tools["place"].inputSchema["properties"]["allow_recycle"]["default"],
             False,
         )
+        self.assertEqual(tools["menlo_execute"].inputSchema["required"], ["code"])
         self.assertTrue(before_start.isError)
         self.assertIn("Call start_robot first", before_start.content[0].text)
+        self.assertFalse(code_result.isError)
+        self.assertIn('"status": "done"', code_result.content[0].text)
 
 
 if __name__ == "__main__":

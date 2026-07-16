@@ -412,6 +412,14 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("status", response)
         self.assertNotIn("requested_entity_id", response)
 
+    async def test_pick_reports_done_without_a_held_entity(self):
+        self.session.invoke_result = {"status": "done", "result": {"status": "done"}}
+
+        response = await self.controller.pick("cube_4")
+
+        self.assertEqual(response["status"], "unexpected_pick")
+        self.assertIsNone(response["held_entity_id"])
+
     async def test_place_rejects_source_recycling_without_opt_in(self):
         self.session.state.robot_status = {
             "robot": {"status": "holding", "held_entity_ids": ["cube_4"]}
@@ -421,6 +429,10 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
             await self.controller.place("cube_4")
 
         self.assertFalse(any(call[0] == "place_entity" for call in self.session.calls))
+
+    async def test_place_requires_a_boolean_recycle_opt_in(self):
+        with self.assertRaisesRegex(ValueError, "must be a boolean"):
+            await self.controller.place("pad_A", allow_recycle=1)  # type: ignore[arg-type]
 
     async def test_place_reports_expected_source_recycling(self):
         self.session.state.robot_status = {
@@ -461,6 +473,54 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_entity_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Unknown entity_id"):
             await self.controller.go_to("not-real")
+
+    async def test_execute_code_runs_guarded_navigation(self):
+        response = await self.controller.execute_code(
+            'menlo.go_to("pad_B")\nreturn menlo.get_robot_state()'
+        )
+
+        self.assertEqual(response["status"], "done")
+        self.assertEqual(response["calls"], 2)
+        self.assertEqual(self.session.calls[0][0], "go_to")
+
+    async def test_execute_code_aborts_after_unexpected_pick(self):
+        self.session.invoke_result = {
+            "status": "done",
+            "result": {"status": "done", "held": "cube_0", "held_count": 1},
+        }
+
+        response = await self.controller.execute_code(
+            'menlo.pick("cube_4")\nmenlo.stop()'
+        )
+
+        self.assertEqual(response["status"], "action_failed")
+        self.assertEqual(response["failed_method"], "pick")
+        self.assertEqual([call[0] for call in self.session.calls], ["pick_entity"])
+
+    async def test_execute_code_stop_confirms_motion_stopped(self):
+        self.session.state.robot_status = _motion_state(0.0)
+
+        response = await self.controller.execute_code("return menlo.stop()")
+
+        self.assertEqual(response["status"], "done")
+        self.assertTrue(response["result"]["stop_confirmation"]["motion_stopped"])
+
+    async def test_execute_code_stop_aborts_when_motion_is_unconfirmed(self):
+        busy_state = _motion_state(0.0, runtime_status="busy", vx=0.5)
+        self.session.state.robot_status = busy_state
+
+        async def unconfirmed_stop(*args, **kwargs):
+            return busy_state, None
+
+        self.controller._wait_for_motion_stop = unconfirmed_stop  # type: ignore[method-assign]
+
+        response = await self.controller.execute_code(
+            "menlo.stop()\nreturn menlo.get_robot_state()"
+        )
+
+        self.assertEqual(response["status"], "action_failed")
+        self.assertEqual(response["failed_method"], "stop")
+        self.assertEqual(response["calls"], 1)
 
     def test_number_rejects_out_of_range_instead_of_silently_clamping(self):
         with self.assertRaisesRegex(ValueError, "between"):

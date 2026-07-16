@@ -53,6 +53,7 @@ has loaded, the agent can use:
 - `get_scene`, `get_robot_state`, and `look`
 - `walk`, `turn`, `go_to`, and `stop`
 - `pick` and verified `place`
+- `menlo_execute` for bounded, high-confidence multi-step plans
 - `stop_robot` to delete the temporary robot and release the session
 
 `look(yaw_degrees?, pitch_degrees?)` replaces the separate camera and head tools.
@@ -72,6 +73,30 @@ Timed `walk` and `turn` failures trigger an immediate `cancel` followed by state
 polling. Their result reports `timed_out_stopped` only after the runtime is ready and
 all commanded velocities are zero; otherwise it reports
 `timed_out_motion_unconfirmed`.
+
+## Executable plans
+
+`menlo_execute(code)` runs a deliberately small Python-like language over the same
+guarded controller methods. Calls look synchronous—do not write `await`:
+
+```python
+for target in ["pad_B", "pad_E", "pad_A"]:
+    menlo.go_to(target)
+return menlo.get_robot_state()
+```
+
+The allowed methods are `get_robot_state`, `get_scene`, `go_to`, `pick`, `place`,
+`stop`, `turn`, and `walk`. Plans may assign variables, branch, loop over bounded
+collections, assert conditions, and return JSON data. The entire plan is validated
+before its first robot call, and it stops immediately when an action fails its MCP
+postcondition. Results include an ordered call trace.
+
+This is a restricted interpreter, not Python `exec`: imports, function definitions,
+arbitrary object access, filesystem/network access, camera capture, and robot
+lifecycle calls are unavailable. Use direct `look` calls whenever the model must
+interpret an image, then submit another executable segment after the uncertainty is
+resolved. Default budgets cap a plan at 20 robot calls, 20 items per loop, 120
+executed statements, and 15 minutes.
 
 The project-local operating guidance is in
 `.agents/skills/menlo-robot-operator/SKILL.md`. It is scoped to this repository and

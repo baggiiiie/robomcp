@@ -20,6 +20,25 @@ Use the project-scoped `menlo-robot` MCP tools for robot tasks in this repositor
 - After navigation, confirm the nested status is `done`. A failed `go_to` can still change the robot pose.
 - `go_to` automatically retries `NAVIGATION_STUCK` at most twice when measured progress toward the target is at least 0.1 m and the previous navigation is confirmed inactive with zero commanded velocity. It cancels and verifies motion after a navigation timeout. Inspect `navigation.history`; do not add further retries after `navigation_stuck`.
 
+## Executable high-confidence plans
+
+Use `menlo_execute` when several steps are deterministic from known entity IDs or
+structured state. It runs a restricted Python subset with synchronous-looking calls
+(no `await`) to `menlo.get_robot_state`, `get_scene`, `go_to`, `pick`, `place`,
+`stop`, `turn`, and `walk`. Assignments, bounded `for` loops, `if`, `assert`, and
+`return` are supported.
+
+Keep uncertainty boundaries outside the plan:
+
+- Do not use it for startup or shutdown; the viewer handshake remains interactive.
+- Do not use scene metadata alone to satisfy a visual request. Call `look` directly,
+  interpret the image, map the object to an exact ID, then execute the next known
+  segment.
+- A guarded navigation, pick, placement, stop, or timed-motion failure aborts all
+  remaining calls. Inspect top-level `status`, `failed_method`, and the ordered
+  `trace`; resolve the failure before submitting a new segment.
+- Prefer one short coherent segment over filling the operation or loop budgets.
+
 ## Find and pick an object by appearance
 
 Use this sequence for color or visual requests:
