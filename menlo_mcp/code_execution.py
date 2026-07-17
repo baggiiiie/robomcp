@@ -66,13 +66,12 @@ class CodeExecutionMixin:
         elif method == "pick" and action.effective_status != "done":
             failure = action_error_message(result) or "pick failed"
         elif method == "place" and result.get("placement", {}).get("status") not in {
+            "benchmark_consumed",
             "verified",
             "recycled",
         }:
             failure = (
-                result.get("message")
-                or action_error_message(result)
-                or "place failed"
+                result.get("message") or action_error_message(result) or "place failed"
             )
         elif method in {"walk", "turn"}:
             if str(result.get("status", "")).startswith("timed_out_"):
@@ -88,9 +87,7 @@ class CodeExecutionMixin:
                 )
                 stopped = bool(
                     state
-                    and self._motion_is_stopped(
-                        state, require_navigation_inactive=True
-                    )
+                    and self._motion_is_stopped(state, require_navigation_inactive=True)
                 )
                 result["stop_confirmation"] = {
                     "motion_stopped": stopped,

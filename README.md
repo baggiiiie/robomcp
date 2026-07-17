@@ -73,7 +73,7 @@ return menlo.get_robot_state()
 
 It is a restricted interpreter (no imports, function defs, filesystem/network, or
 lifecycle calls). Plans are validated before the first robot call and stop on the first
-failed postcondition. Default budgets: 20 robot calls, 20 items/loop, 120 statements, 15
+failed postcondition. Default budgets: 50 robot calls, 20 items/loop, 120 statements, 15
 minutes.
 
 ## More

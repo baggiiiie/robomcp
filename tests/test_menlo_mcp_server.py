@@ -80,9 +80,10 @@ class FakeSession:
         if errors:
             raise errors.pop(0)
         states = self.robot_states_after_invoke.get(skill, [])
+        supplied_state = bool(states)
         if states:
             self.state.robot_status = states.pop(0)
-        if skill == "place_entity":
+        if skill == "place_entity" and not supplied_state:
             self.state.robot_status = {
                 "robot": {"status": "ready", "held_entity_ids": []}
             }
@@ -474,6 +475,47 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response["placement"]["status"], "recycled")
 
+    async def test_place_accepts_benchmark_consumption_on_expected_pad(self):
+        self.session.state.robot_status = {
+            "robot": {
+                "status": "holding",
+                "held_entity_ids": ["cube_4"],
+                "extra": {
+                    "sort_benchmark": {
+                        "enabled": True,
+                        "correct_count": 0,
+                        "wrong_count": 0,
+                        "spoiled_count": 0,
+                        "pallet_stack_counts": {"pad_B": 0},
+                    }
+                },
+            }
+        }
+        self.session.robot_states_after_invoke["place_entity"] = [
+            {
+                "robot": {
+                    "status": "ready",
+                    "held_entity_ids": [],
+                    "extra": {
+                        "sort_benchmark": {
+                            "enabled": True,
+                            "correct_count": 1,
+                            "wrong_count": 0,
+                            "spoiled_count": 0,
+                            "pallet_stack_counts": {"pad_B": 1},
+                        }
+                    },
+                }
+            }
+        ]
+        self.session.state.scene_entities["cube_4"].visible = False
+        self.session.state.scene_entities["cube_4"].state.parent_pad_id = None
+
+        response = await self.controller.place("pad_B")
+
+        self.assertNotIn("status", response)
+        self.assertEqual(response["placement"]["status"], "benchmark_consumed")
+
     async def test_place_reports_unexpected_scene_postcondition(self):
         self.session.state.robot_status = {
             "robot": {"status": "holding", "held_entity_ids": ["cube_4"]}
@@ -511,6 +553,47 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["status"], "done")
         self.assertEqual(response["calls"], 2)
         self.assertEqual(self.session.calls[0][0], "go_to")
+
+    async def test_execute_code_accepts_benchmark_consumption(self):
+        self.session.state.robot_status = {
+            "robot": {
+                "status": "holding",
+                "held_entity_ids": ["cube_4"],
+                "extra": {
+                    "sort_benchmark": {
+                        "enabled": True,
+                        "correct_count": 0,
+                        "wrong_count": 0,
+                        "spoiled_count": 0,
+                        "pallet_stack_counts": {"pad_B": 0},
+                    }
+                },
+            }
+        }
+        self.session.robot_states_after_invoke["place_entity"] = [
+            {
+                "robot": {
+                    "status": "ready",
+                    "held_entity_ids": [],
+                    "extra": {
+                        "sort_benchmark": {
+                            "enabled": True,
+                            "correct_count": 1,
+                            "wrong_count": 0,
+                            "spoiled_count": 0,
+                            "pallet_stack_counts": {"pad_B": 1},
+                        }
+                    },
+                }
+            }
+        ]
+        self.session.state.scene_entities["cube_4"].visible = False
+        self.session.state.scene_entities["cube_4"].state.parent_pad_id = None
+
+        response = await self.controller.execute_code('menlo.place("pad_B")')
+
+        self.assertEqual(response["status"], "done")
+        self.assertEqual(response["calls"], 1)
 
     async def test_execute_code_aborts_after_unexpected_pick(self):
         self.session.invoke_result = {

@@ -238,7 +238,7 @@ class MenloCodeExecutor:
         self,
         call_menlo: MenloCall,
         *,
-        max_calls: int = 20,
+        max_calls: int = 50,
         max_statements: int = 120,
         max_loop_items: int = 20,
         max_nodes: int = 500,

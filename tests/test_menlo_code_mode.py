@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from typing import Any
 
 from menlo_code_mode import MenloCodeExecutor, PlanActionError
@@ -88,6 +89,56 @@ return menlo.get_robot_state()
         self.assertEqual(result["status"], "execution_failed")
         self.assertEqual(len(self.calls), 2)
         self.assertIn("operation budget", result["error"])
+
+    async def test_default_budget_runs_complete_benchmark_plan(self):
+        colors = {
+            "blue": "pad_D",
+            "green": "pad_C",
+            "red": "pad_B",
+            "yellow": "pad_E",
+        }
+        first_colors = ["blue", "green", "green", "blue", "red", "red", "blue"]
+        second_colors = ["red", "green", "blue", "yellow", "yellow"]
+        scenes = []
+        for prefix, batch in (("cube", first_colors), ("cube_pool", second_colors)):
+            scenes.append(
+                {
+                    "entities": {
+                        f"{prefix}_{index}": {
+                            "visible": True,
+                            "state": {"parent_pad_id": "pad_A", "color": color},
+                        }
+                        for index, color in enumerate(batch)
+                    }
+                }
+            )
+
+        async def benchmark_call(method, arguments, keywords):
+            self.calls.append((method, arguments, keywords))
+            if method == "get_scene":
+                return scenes.pop(0)
+            if method == "place":
+                return {
+                    "robot_state": {
+                        "robot": {"extra": {"sort_benchmark": {"status": "complete"}}}
+                    }
+                }
+            return {"status": "ok"}
+
+        guide = (Path(__file__).parents[1] / "SORTING_BENCHMARK.md").read_text()
+        plan = guide.split("```python\n", 1)[1].split("\n```", 1)[0]
+
+        result = await MenloCodeExecutor(benchmark_call).execute(plan)
+
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(result["calls"], 50)
+        self.assertEqual(result["result"], {"status": "complete"})
+        self.assertEqual([method for method, _, _ in self.calls].count("get_scene"), 2)
+        self.assertEqual([method for method, _, _ in self.calls].count("place"), 12)
+        self.assertEqual(
+            [arguments[0] for method, arguments, _ in self.calls if method == "place"],
+            [colors[color] for color in first_colors + second_colors],
+        )
 
     async def test_supports_state_based_selection(self):
         async def scene_call(method, arguments, keywords):
